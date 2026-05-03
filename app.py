@@ -10,11 +10,10 @@ import yt_dlp
 app = Flask(__name__)
 CORS(app)
 
-# Хранилище прямых ссылок (uid -> {url, expires})
-video_map = {}
+video_map = {}   # uid -> {'url': ..., 'expires': ...}
 
 def get_direct_url(url):
-    """Извлекает прямую ссылку на видео (аудио+видео в одном потоке)"""
+    """Извлекает прямую ссылку на видео со звуком одним потоком (в идеале 720p)"""
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -26,11 +25,13 @@ def get_direct_url(url):
         info = ydl.extract_info(url, download=False)
         formats = info.get('formats', [])
         for f in formats:
-            if f.get('format_id') == '22':   # 720p со звуком
+            if f.get('format_id') == '22':   # 720p с уже готовым звуком
                 return f.get('url'), info.get('title')
-        target_format = formats[-1]
+        target_format = formats[-1]          # иначе берём лучший
         return target_format.get('url'), info.get('title')
 
+
+# ──────────────── старый добрый загрузчик ────────────────
 @app.route('/api/download', methods=['POST'])
 def download():
     data = request.get_json()
@@ -67,6 +68,12 @@ def download():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/download/<filename>')
+def serve_file(filename):
+    return send_from_directory(tempfile.gettempdir(), filename, as_attachment=True)
+
+
+# ──────────────── стриминг видео по частям ────────────────
 @app.route('/api/stream', methods=['POST'])
 def stream():
     data = request.get_json()
@@ -82,7 +89,7 @@ def stream():
         uid = str(uuid.uuid4())
         video_map[uid] = {
             'url': direct_url,
-            'expires': time.time() + 5 * 3600
+            'expires': time.time() + 5 * 3600   # 5 часов
         }
 
         return jsonify({
@@ -118,10 +125,8 @@ def stream_video(uid):
         }
     )
 
-@app.route('/download/<filename>')
-def serve_file(filename):
-    return send_from_directory(tempfile.gettempdir(), filename, as_attachment=True)
 
+# ──────────────── проверка жизни ────────────────
 @app.route('/ping')
 def ping():
     return 'pong'
