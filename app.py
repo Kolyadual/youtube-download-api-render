@@ -10,28 +10,45 @@ import yt_dlp
 app = Flask(__name__)
 CORS(app)
 
-video_map = {}   # uid -> {'url': ..., 'expires': ...}
+video_map = {}
+
+def get_cookiefile():
+    """Возвращает путь к файлу с куками.
+    Сначала проверяет переменную окружения YOUTUBE_COOKIES,
+    потом локальный файл cookies.txt (если он есть)."""
+    data = os.environ.get('YOUTUBE_COOKIES')
+    if data:
+        path = '/tmp/cookies.txt'
+        with open(path, 'w') as f:
+            f.write(data)
+        return path
+    if os.path.exists('cookies.txt'):
+        return 'cookies.txt'
+    return None
 
 def get_direct_url(url):
-    """Извлекает прямую ссылку на видео со звуком одним потоком (в идеале 720p)"""
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'extractor_args': {'youtube': {'player_client': ['android']}},
         'format': 'bestvideo[height<=1080]+bestaudio/best[ext=m4a]/best[height<=1080]/best',
         'merge_output_format': 'mp4',
     }
+    cookiefile = get_cookiefile()
+    if cookiefile:
+        ydl_opts['cookiefile'] = cookiefile
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         formats = info.get('formats', [])
         for f in formats:
-            if f.get('format_id') == '22':   # 720p с уже готовым звуком
+            if f.get('format_id') == '22':
                 return f.get('url'), info.get('title')
-        target_format = formats[-1]          # иначе берём лучший
+        target_format = formats[-1]
         return target_format.get('url'), info.get('title')
 
 
-# ──────────────── старый добрый загрузчик ────────────────
 @app.route('/api/download', methods=['POST'])
 def download():
     data = request.get_json()
@@ -44,8 +61,13 @@ def download():
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'extractor_args': {'youtube': {'player_client': ['android']}},
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(title)s.%(ext)s'),
     }
+    cookiefile = get_cookiefile()
+    if cookiefile:
+        ydl_opts['cookiefile'] = cookiefile
+
     if mode == 'audio':
         ydl_opts['format'] = 'bestaudio/best'
         ydl_opts['postprocessors'] = [{
@@ -68,12 +90,7 @@ def download():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/download/<filename>')
-def serve_file(filename):
-    return send_from_directory(tempfile.gettempdir(), filename, as_attachment=True)
 
-
-# ──────────────── стриминг видео по частям ────────────────
 @app.route('/api/stream', methods=['POST'])
 def stream():
     data = request.get_json()
@@ -89,7 +106,7 @@ def stream():
         uid = str(uuid.uuid4())
         video_map[uid] = {
             'url': direct_url,
-            'expires': time.time() + 5 * 3600   # 5 часов
+            'expires': time.time() + 5 * 3600
         }
 
         return jsonify({
@@ -99,6 +116,7 @@ def stream():
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/video/<uid>')
 def stream_video(uid):
@@ -126,10 +144,15 @@ def stream_video(uid):
     )
 
 
-# ──────────────── проверка жизни ────────────────
+@app.route('/download/<filename>')
+def serve_file(filename):
+    return send_from_directory(tempfile.gettempdir(), filename, as_attachment=True)
+
+
 @app.route('/ping')
 def ping():
     return 'pong'
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
