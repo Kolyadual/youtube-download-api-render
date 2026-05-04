@@ -27,12 +27,13 @@ def get_cookiefile():
     return None
 
 def get_direct_url(url):
+    """Извлекает прямую ссылку на видео со звуком"""
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
         'extractor_args': {'youtube': {'player_client': ['android']}},
-        'format': 'bestvideo[height<=1080]+bestaudio/best[ext=m4a]/best[height<=1080]/best',
+        'format': 'best[height<=1080]',  # Упрощённый универсальный формат
         'merge_output_format': 'mp4',
     }
     cookiefile = get_cookiefile()
@@ -42,11 +43,18 @@ def get_direct_url(url):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
         formats = info.get('formats', [])
+        
+        # Ищем формат с видео и аудио в одном потоке
         for f in formats:
-            if f.get('format_id') == '22':
+            if f.get('acodec') != 'none' and f.get('vcodec') != 'none':
                 return f.get('url'), info.get('title')
-        target_format = formats[-1]
-        return target_format.get('url'), info.get('title')
+        
+        # Запасной вариант — берём последний доступный
+        if formats:
+            target = formats[-1]
+            return target.get('url'), info.get('title')
+        
+        return None, info.get('title')
 
 
 @app.route('/api/download', methods=['POST'])
@@ -54,6 +62,7 @@ def download():
     data = request.get_json()
     url = data.get('url')
     mode = data.get('mode', 'video')
+    
     if not url:
         return jsonify({'error': 'URL is required'}), 400
 
@@ -64,6 +73,7 @@ def download():
         'extractor_args': {'youtube': {'player_client': ['android']}},
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(title)s.%(ext)s'),
     }
+    
     cookiefile = get_cookiefile()
     if cookiefile:
         ydl_opts['cookiefile'] = cookiefile
@@ -76,7 +86,7 @@ def download():
             'preferredquality': '192',
         }]
     else:
-        ydl_opts['format'] = 'bestvideo[height<=1080]+bestaudio/best'
+        ydl_opts['format'] = 'best[height<=1080]/best'  # Упрощённый
         ydl_opts['merge_output_format'] = 'mp4'
 
     try:
@@ -95,6 +105,7 @@ def download():
 def stream():
     data = request.get_json()
     url = data.get('url')
+    
     if not url:
         return jsonify({'error': 'URL is required'}), 400
 
@@ -106,7 +117,7 @@ def stream():
         uid = str(uuid.uuid4())
         video_map[uid] = {
             'url': direct_url,
-            'expires': time.time() + 5 * 3600
+            'expires': time.time() + 5 * 3600  # 5 часов
         }
 
         return jsonify({
