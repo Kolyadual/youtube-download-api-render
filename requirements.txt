@@ -2,8 +2,4 @@ flask
 flask-cors
 yt-dlp
 gunicorn
-requestsflask
-flask-cors
-yt-dlp
-gunicorn
 requests
