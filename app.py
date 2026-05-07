@@ -35,6 +35,7 @@ def download():
         'noplaylist': True,
         'extractor_args': {'youtube': {'player_client': ['android']}},
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(title)s.%(ext)s'),
+        'format': 'best',  # ПРОСТО BEST, БЕЗ ВСЯКИХ СЛОЖНОСТЕЙ
     }
     
     cookiefile = get_cookiefile()
@@ -48,9 +49,6 @@ def download():
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }]
-    else:
-        ydl_opts['format'] = 'bestvideo[height<=1080]+bestaudio/best'
-        ydl_opts['merge_output_format'] = 'mp4'
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
