@@ -8,7 +8,6 @@ app = Flask(__name__)
 CORS(app)
 
 def get_cookiefile():
-    """Ищет куки в переменной окружения или файле"""
     data = os.environ.get('YOUTUBE_COOKIES')
     if data:
         path = '/tmp/cookies.txt'
@@ -35,7 +34,6 @@ def download():
         'noplaylist': True,
         'extractor_args': {'youtube': {'player_client': ['android']}},
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(title)s.%(ext)s'),
-        'format': 'best',  # ПРОСТО BEST, БЕЗ ВСЯКИХ СЛОЖНОСТЕЙ
     }
     
     cookiefile = get_cookiefile()
@@ -43,7 +41,6 @@ def download():
         ydl_opts['cookiefile'] = cookiefile
 
     if mode == 'audio':
-        ydl_opts['format'] = 'bestaudio/best'
         ydl_opts['postprocessors'] = [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
