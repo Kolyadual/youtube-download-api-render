@@ -13,9 +13,7 @@ CORS(app)
 video_map = {}
 
 def get_cookiefile():
-    """Возвращает путь к файлу с куками.
-    Сначала проверяет переменную окружения YOUTUBE_COOKIES,
-    потом локальный файл cookies.txt (если он есть)."""
+    """Ищет куки в переменной окружения или файле"""
     data = os.environ.get('YOUTUBE_COOKIES')
     if data:
         path = '/tmp/cookies.txt'
@@ -27,11 +25,12 @@ def get_cookiefile():
     return None
 
 def get_direct_url(url):
-    """Извлекает прямую ссылку на видео, перебирая доступные форматы"""
+    """Получает прямую ссылку на видео"""
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'format': 'best',
         'extractor_args': {'youtube': {'player_client': ['android']}},
     }
     
@@ -41,34 +40,7 @@ def get_direct_url(url):
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
-        formats = info.get('formats', [])
-        title = info.get('title', 'Без названия')
-        
-        if not formats:
-            raise Exception('Не найдено ни одного формата')
-        
-        # Приоритет 1: формат с видео и аудио в одном потоке (обычно 720p)
-        for f in formats:
-            vcodec = f.get('vcodec', 'none')
-            acodec = f.get('acodec', 'none')
-            if vcodec != 'none' and acodec != 'none':
-                print(f"✅ Выбран формат: {f.get('format_id')} - {f.get('format_note', '?')} - {f.get('ext')}")
-                return f.get('url'), title
-        
-        # Приоритет 2: любое видео (даже без звука)
-        for f in formats:
-            if f.get('vcodec', 'none') != 'none':
-                print(f"⚠️ Выбрано видео без звука: {f.get('format_id')} - {f.get('format_note', '?')}")
-                return f.get('url'), title
-        
-        # Приоритет 3: только аудио
-        for f in formats:
-            if f.get('acodec', 'none') != 'none':
-                print(f"⚠️ Выбрано только аудио: {f.get('format_id')}")
-                return f.get('url'), title
-        
-        # Вообще ничего
-        raise Exception('Не удалось найти подходящий формат')
+        return info.get('url'), info.get('title', 'Без названия')
 
 
 @app.route('/api/download', methods=['POST'])
@@ -92,7 +64,6 @@ def download():
     if cookiefile:
         ydl_opts['cookiefile'] = cookiefile
 
-    # Максимально простой формат для скачивания
     if mode == 'audio':
         ydl_opts['format'] = 'bestaudio/best'
         ydl_opts['postprocessors'] = [{
@@ -101,7 +72,7 @@ def download():
             'preferredquality': '192',
         }]
     else:
-        ydl_opts['format'] = 'bestvideo+bestaudio/best'
+        ydl_opts['format'] = 'best'
         ydl_opts['merge_output_format'] = 'mp4'
 
     try:
@@ -127,7 +98,7 @@ def stream():
     try:
         direct_url, title = get_direct_url(url)
         if not direct_url:
-            return jsonify({'error': 'Could not extract direct URL'}), 500
+            return jsonify({'error': 'Не удалось получить ссылку'}), 500
 
         uid = str(uuid.uuid4())
         video_map[uid] = {
@@ -135,12 +106,7 @@ def stream():
             'expires': time.time() + 5 * 3600
         }
 
-        # Извлекаем ID видео для превью
-        video_id = None
-        if 'v=' in url:
-            video_id = url.split('v=')[-1].split('&')[0]
-        elif 'youtu.be/' in url:
-            video_id = url.split('youtu.be/')[-1].split('?')[0]
+        video_id = url.split('v=')[-1].split('&')[0] if 'v=' in url else ''
 
         return jsonify({
             'stream_id': uid,
@@ -155,17 +121,13 @@ def stream():
 def stream_video(uid):
     entry = video_map.get(uid)
     if not entry or time.time() > entry['expires']:
-        return "Video not found or expired", 404
+        return "Видео не найдено или срок истёк", 404
 
     headers = {
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36'
     }
     
-    try:
-        resp = requests.get(entry['url'], stream=True, headers=headers, timeout=30)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        return f"Error fetching video: {str(e)}", 500
+    resp = requests.get(entry['url'], stream=True, headers=headers)
 
     def generate():
         for chunk in resp.iter_content(chunk_size=8192):
@@ -176,10 +138,8 @@ def stream_video(uid):
         generate(),
         status=resp.status_code,
         headers={
-            'Content-Type': resp.headers.get('Content-Type', 'video/mp4'),
-            'Accept-Ranges': 'bytes',
-            'Access-Control-Allow-Origin': '*',
-            'Cache-Control': 'no-cache'
+            'Content-Type': 'video/mp4',
+            'Access-Control-Allow-Origin': '*'
         }
     )
 
@@ -192,43 +152,6 @@ def serve_file(filename):
 @app.route('/ping')
 def ping():
     return 'pong'
-
-
-# Для отладки: можно посмотреть, какие форматы доступны
-@app.route('/api/formats', methods=['POST'])
-def list_formats():
-    data = request.get_json()
-    url = data.get('url')
-    
-    if not url:
-        return jsonify({'error': 'URL is required'}), 400
-    
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-    }
-    
-    cookiefile = get_cookiefile()
-    if cookiefile:
-        ydl_opts['cookiefile'] = cookiefile
-    
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            formats = []
-            for f in info.get('formats', []):
-                formats.append({
-                    'format_id': f.get('format_id'),
-                    'ext': f.get('ext'),
-                    'vcodec': f.get('vcodec'),
-                    'acodec': f.get('acodec'),
-                    'format_note': f.get('format_note'),
-                    'filesize': f.get('filesize'),
-                })
-            return jsonify({'formats': formats[:20]})  # Первые 20 форматов
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
 
 
 if __name__ == '__main__':
