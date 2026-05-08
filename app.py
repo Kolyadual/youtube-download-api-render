@@ -1,93 +1,67 @@
-import os
-import sys
 import subprocess
-import uuid
-import tempfile
-import shutil
-from flask import Flask, request, jsonify, send_file
+import json
+from flask import Flask, request, jsonify, redirect
 from flask_cors import CORS
 
 app = Flask(__name__)
-CORS(app)
+CORS(app)  # разрешаем запросы с GitHub Pages
 
-@app.route('/download', methods=['POST'])
-def download_video():
-    data = request.get_json()
-    url = data.get('url') if data else None
-
+@app.route('/formats')
+def formats():
+    url = request.args.get('url')
     if not url:
-        return jsonify({'error': 'URL не указан'}), 400
-
-    unique_id = str(uuid.uuid4())
-    temp_dir = tempfile.mkdtemp(prefix='ytdl_')
-
-    output_template = os.path.join(temp_dir, '%(title)s.%(ext)s')
-
-    command = [
-        sys.executable, '-m', 'yt_dlp',
-        '-f', 'best[height<=720]',
-        '-o', output_template,
-        '--no-playlist',
-        '--merge-output-format', 'mp4',
-        '--no-warnings',
-        url
-    ]
+        return jsonify({'error': 'URL is required'}), 400
 
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
-
-        if result.returncode != 0:
-            error_msg = result.stderr.strip() or result.stdout.strip() or 'Неизвестная ошибка'
-            print(f"yt-dlp error: {error_msg}")
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            return jsonify({'error': f'Ошибка: {error_msg[-300:]}'}), 500
-
-        # Ищем любой скачанный файл
-        files = os.listdir(temp_dir)
-        video_files = [f for f in files if f.endswith(('.mp4', '.mkv', '.webm', '.avi'))]
-
-        if not video_files:
-            audio_files = [f for f in files if f.endswith(('.mp3', '.m4a', '.opus', '.aac'))]
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            if audio_files:
-                return jsonify({'error': 'Найдено только аудио. Видео недоступно.'}), 404
-            return jsonify({'error': 'Файл не найден после скачивания'}), 500
-
-        filepath = os.path.join(temp_dir, video_files[0])
-
-        response = send_file(
-            filepath,
-            as_attachment=True,
-            download_name=video_files[0],
-            mimetype='video/mp4'
+        # --dump-json отдаёт всю информацию о видео без скачивания
+        result = subprocess.run(
+            ['yt-dlp', '--dump-json', '--no-playlist', url],
+            capture_output=True, text=True, check=True
         )
+        info = json.loads(result.stdout)
 
-        # Чистим после отправки — без call_on_close которого нет в новых Flask
-        response.headers['X-Cleanup-Path'] = temp_dir  # метка на всякий
+        # Собираем только видео+аудио форматы (с видео и аудио дорожками)
+        formats_list = []
+        for f in info.get('formats', []):
+            if f.get('vcodec') == 'none':
+                continue  # чисто аудио пропускаем, но можно добавить и аудио при желании
+            formats_list.append({
+                'format_id': f['format_id'],
+                'ext': f['ext'],
+                'resolution': f.get('resolution') or f.get('format_note') or 'audio',
+                'filesize': f.get('filesize')
+            })
 
-        return response
-
-    except subprocess.TimeoutExpired:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return jsonify({'error': 'Таймаут (5 минут). Видео слишком большое для бесплатного тарифа.'}), 504
-
+        return jsonify({
+            'title': info.get('title'),
+            'formats': formats_list
+        })
+    except subprocess.CalledProcessError as e:
+        return jsonify({'error': f'yt-dlp failed: {e.stderr}'}), 500
     except Exception as e:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        return jsonify({'error': f'Сбой сервера: {str(e)}'}), 500
+        return jsonify({'error': str(e)}), 500
 
-    finally:
-        # Дополнительная страховка — чистим если response не отправился
-        if 'response' not in locals() and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir, ignore_errors=True)
+@app.route('/download')
+def download():
+    url = request.args.get('url')
+    format_id = request.args.get('format_id', 'best')
+    if not url:
+        return jsonify({'error': 'URL is required'}), 400
 
-@app.route('/')
-def index():
-    return jsonify({
-        'status': 'ok',
-        'yt-dlp_version': 'latest',
-        'python_version': sys.version.split()[0]
-    })
+    try:
+        # -g получает прямую ссылку для указанного формата
+        result = subprocess.run(
+            ['yt-dlp', '-g', '-f', format_id, '--no-playlist', url],
+            capture_output=True, text=True, check=True
+        )
+        direct_url = result.stdout.strip().split('\n')[0]  # первая ссылка
+        if not direct_url:
+            return jsonify({'error': 'No URL returned'}), 500
+        return redirect(direct_url)
+    except subprocess.CalledProcessError as e:
+        return jsonify({'error': f'yt-dlp failed: {e.stderr}'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run()
