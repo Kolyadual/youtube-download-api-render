@@ -1,73 +1,67 @@
 import os
-import tempfile
-from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
 import yt_dlp
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
+import tempfile
+import uuid
 
 app = Flask(__name__)
-CORS(app)
+CORS(app) # Разрешаем запросы с GitHub Pages
 
-def get_cookiefile():
-    data = os.environ.get('YOUTUBE_COOKIES')
-    if data:
-        path = '/tmp/cookies.txt'
-        with open(path, 'w') as f:
-            f.write(data)
-        return path
-    if os.path.exists('cookies.txt'):
-        return 'cookies.txt'
-    return None
+DOWNLOAD_FOLDER = tempfile.gettempdir() # Временная папка на сервере Render
 
-
-@app.route('/api/download', methods=['POST'])
-def download():
+@app.route('/download', methods=['POST'])
+def download_video():
     data = request.get_json()
     url = data.get('url')
-    mode = data.get('mode', 'video')
-    
+
     if not url:
-        return jsonify({'error': 'URL is required'}), 400
+        return jsonify({'error': 'URL не указан'}), 400
+
+    # Генерируем уникальное имя, чтобы файлы не перезаписывались
+    unique_id = str(uuid.uuid4())
+    output_path = os.path.join(DOWNLOAD_FOLDER, f'{unique_id}.mp4')
 
     ydl_opts = {
+        'format': 'best[height<=720]', # Ограничим качество для скорости и размера
+        'outtmpl': output_path,
+        'noplaylist': True, # Не скачиваем плейлисты, только одно видео
         'quiet': True,
-        'no_warnings': True,
-        'noplaylist': True,
-        'extractor_args': {'youtube': {'player_client': ['android']}},
-        'outtmpl': os.path.join(tempfile.gettempdir(), '%(title)s.%(ext)s'),
     }
-    
-    cookiefile = get_cookiefile()
-    if cookiefile:
-        ydl_opts['cookiefile'] = cookiefile
-
-    if mode == 'audio':
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }]
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            filepath = ydl.prepare_filename(info)
-            if mode == 'audio':
-                filepath = os.path.splitext(filepath)[0] + '.mp3'
-            filename = os.path.basename(filepath)
-            return jsonify({'download_url': f'/download/{filename}', 'filename': filename})
+            filename = ydl.prepare_filename(info)
+            # yt-dlp может добавить расширение сам, проверяем финальное имя
+            final_filepath = output_path
+            if not os.path.exists(final_filepath):
+                 # Иногда расширение может быть mkv/webm
+                 for ext in ['mp4', 'mkv', 'webm']:
+                     potential = f'{output_path[:-4]}.{ext}'
+                     if os.path.exists(potential):
+                         final_filepath = potential
+                         break
+
+            # Получаем безопасное оригинальное название
+            safe_title = "video.mp4"
+            try:
+                safe_title = f"{info.get('title', 'video')}.mp4"
+                safe_title = "".join(c for c in safe_title if c.isalnum() or c in (' ', '.', '_', '-')).rstrip()
+            except:
+                pass
+
+            return send_file(
+                final_filepath,
+                as_attachment=True,
+                download_name=safe_title,
+                mimetype='video/mp4'
+            )
+
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/download/<filename>')
-def serve_file(filename):
-    return send_from_directory(tempfile.gettempdir(), filename, as_attachment=True)
-
-
-@app.route('/ping')
-def ping():
-    return 'pong'
-
+        return jsonify({'error': f'Ошибка при скачивании: {str(e)}'}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    # Render сам установит PORT в переменные окружения
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
