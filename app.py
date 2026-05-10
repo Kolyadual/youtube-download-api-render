@@ -8,7 +8,7 @@ app = Flask(__name__)
 CORS(app)
 
 # ⚠️ СЮДА ВСТАВЬ URL СВОЕГО POT-СЕРВЕРА
-POT_PROVIDER_URL = 'https://pot-provider-xxxx.onrender.com'
+POT_PROVIDER_URL = 'https://bgutil-ytdlp-pot-provider.onrender.com'
 
 def get_cookiefile():
     data = os.environ.get('YOUTUBE_COOKIES')
