@@ -1,16 +1,14 @@
 import os
-import io
-import shutil
-import subprocess
+import tempfile
 import uuid
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 
 app = FastAPI(title="Open Video Downloader API")
 
-# Разрешаем доступ нашему фронтенду на GitHub Pages
+# Разрешаем твоему фронтенду на GitHub Pages обращаться к API
 origins = os.getenv("ALLOWED_ORIGIN", "*")
 app.add_middleware(
     CORSMiddleware,
@@ -21,93 +19,59 @@ app.add_middleware(
 
 @app.get("/")
 def root():
-    return {"status": "API is running"}
+    return {"status": "API is running. Use /download?url=..."}
 
 @app.get("/download")
 async def download_video(url: str = Query(..., description="YouTube video URL")):
-    """
-    Скачивает видео по ссылке и отдаёт готовый MP4-файл.
-    """
-    # Проверка корректности URL (базовая)
-    if "youtube.com/watch" not in url and "youtu.be/" not in url:
+    # Базовая проверка ссылки
+    if not any(domain in url for domain in ("youtube.com/watch", "youtu.be/")):
         raise HTTPException(status_code=400, detail="Некорректная ссылка на YouTube")
 
-    # Уникальный идентификатор для временных файлов (если бы мы их сохраняли)
-    unique_id = str(uuid.uuid4())[:8]
+    # Создаём временную папку для загрузки
+    with tempfile.TemporaryDirectory() as tmpdir:
+        unique_id = str(uuid.uuid4())[:8]
+        outtmpl = os.path.join(tmpdir, f"{unique_id}_%(title)s.%(ext)s")
 
-    # Настройки yt-dlp: скачиваем видео и аудио по отдельности, но не сливаем,
-    # потому что слияние будем делать сами через ffmpeg в потоке
-    ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'outtmpl': f'/tmp/{unique_id}_%(format_id)s.%(ext)s',  # сохраняем во временную папку Render
-        'quiet': True,
-        'no_warnings': True,
-        # Не склеиваем автоматически — нам нужны отдельные файлы для потоковой передачи
-        'merge_output_format': None,
-    }
+        ydl_opts = {
+            # Выбираем лучший MP4, где видео и аудио уже объединены (до 720p/1080p)
+            'format': 'best[ext=mp4]/best',
+            'outtmpl': outtmpl,
+            'quiet': True,
+            'no_warnings': True,
+            # На случай возрастных ограничений можно добавить cookies, но пока без них
+            # 'cookiefile': 'cookies.txt'
+        }
 
-    # Загружаем с помощью yt-dlp
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        title = info.get('title', 'video')
-        # Ищем пути к скачанным файлам видео и аудио
-        video_path = None
-        audio_path = None
-        for fmt in info.get('requested_formats', []):
-            if fmt.get('vcodec') != 'none':
-                video_path = ydl.prepare_filename(fmt)
-            if fmt.get('acodec') != 'none':
-                audio_path = ydl.prepare_filename(fmt)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                title = info.get('title', 'video')
 
-        # Если формат одиночный (уже со звуком), просто читаем файл и отдаём
-        if video_path and audio_path is None:
-            # Одиночный файл, отдаём как есть
-            with open(video_path, 'rb') as f:
-                single_file_data = f.read()
-            # Удаляем временный файл
-            os.remove(video_path)
-            return StreamingResponse(
-                io.BytesIO(single_file_data),
-                media_type='video/mp4',
-                headers={'Content-Disposition': f'attachment; filename="{title}.mp4"'}
-            )
+                # Найдём скачанный файл (один, без аудио-разрывов)
+                downloaded_file = ydl.prepare_filename(info)
+                # Если такого файла нет, значит расширение было изменено
+                if not os.path.exists(downloaded_file):
+                    # Попробуем найти любой mp4 в папке
+                    for f in os.listdir(tmpdir):
+                        if f.endswith('.mp4'):
+                            downloaded_file = os.path.join(tmpdir, f)
+                            break
+                    else:
+                        raise Exception("Скачанный файл не найден")
 
-        # Если не нашлись пути (что редко, но может быть)
-        if not video_path or not audio_path:
-            raise HTTPException(status_code=500, detail="Не удалось извлечь видео и аудио потоки")
+                # Отдаём файл и автоматически удаляем после ответа
+                return FileResponse(
+                    downloaded_file,
+                    media_type='video/mp4',
+                    headers={'Content-Disposition': f'attachment; filename="{title}.mp4"'}
+                )
 
-        # Запускаем ffmpeg для склейки и отправки результата в реальном времени
-        def generate():
-            # Команда: ffmpeg -i video -i audio -c:v copy -c:a aac -f mp4 pipe:1
-            cmd = [
-                'ffmpeg',
-                '-i', video_path,
-                '-i', audio_path,
-                '-c:v', 'copy',
-                '-c:a', 'aac',
-                '-f', 'mp4',
-                '-movflags', 'frag_keyframe+empty_moov',  # для стриминга
-                'pipe:1'
-            ]
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            try:
-                for chunk in iter(lambda: proc.stdout.read(8192), b''):
-                    yield chunk
-                proc.wait()
-                if proc.returncode != 0:
-                    raise Exception("ffmpeg error")
-            finally:
-                # Очистка временных файлов
-                os.remove(video_path)
-                os.remove(audio_path)
+        except yt_dlp.utils.DownloadError as e:
+            raise HTTPException(status_code=500, detail=f"Ошибка загрузки: {str(e)}")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Ошибка сервера: {str(e)}")
 
-        return StreamingResponse(
-            generate(),
-            media_type='video/mp4',
-            headers={'Content-Disposition': f'attachment; filename="{title}.mp4"'}
-        )
-
-# Точка входа для Render: uvicorn запускает app
+# Команда запуска остаётся: uvicorn app:app --host 0.0.0.0 --port $PORT
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
