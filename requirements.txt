@@ -1,4 +1,3 @@
-flask
-flask-cors
+fastapi
+uvicorn
 yt-dlp
-gunicorn
