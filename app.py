@@ -1,67 +1,113 @@
+import os
+import io
+import shutil
 import subprocess
-import json
-from flask import Flask, request, jsonify, redirect
-from flask_cors import CORS
+import uuid
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+import yt_dlp
 
-app = Flask(__name__)
-CORS(app)  # разрешаем запросы с GitHub Pages
+app = FastAPI(title="Open Video Downloader API")
 
-@app.route('/formats')
-def formats():
-    url = request.args.get('url')
-    if not url:
-        return jsonify({'error': 'URL is required'}), 400
+# Разрешаем доступ нашему фронтенду на GitHub Pages
+origins = os.getenv("ALLOWED_ORIGIN", "*")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[origins],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    try:
-        # --dump-json отдаёт всю информацию о видео без скачивания
-        result = subprocess.run(
-            ['yt-dlp', '--dump-json', '--no-playlist', url],
-            capture_output=True, text=True, check=True
+@app.get("/")
+def root():
+    return {"status": "API is running"}
+
+@app.get("/download")
+async def download_video(url: str = Query(..., description="YouTube video URL")):
+    """
+    Скачивает видео по ссылке и отдаёт готовый MP4-файл.
+    """
+    # Проверка корректности URL (базовая)
+    if "youtube.com/watch" not in url and "youtu.be/" not in url:
+        raise HTTPException(status_code=400, detail="Некорректная ссылка на YouTube")
+
+    # Уникальный идентификатор для временных файлов (если бы мы их сохраняли)
+    unique_id = str(uuid.uuid4())[:8]
+
+    # Настройки yt-dlp: скачиваем видео и аудио по отдельности, но не сливаем,
+    # потому что слияние будем делать сами через ffmpeg в потоке
+    ydl_opts = {
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'outtmpl': f'/tmp/{unique_id}_%(format_id)s.%(ext)s',  # сохраняем во временную папку Render
+        'quiet': True,
+        'no_warnings': True,
+        # Не склеиваем автоматически — нам нужны отдельные файлы для потоковой передачи
+        'merge_output_format': None,
+    }
+
+    # Загружаем с помощью yt-dlp
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(url, download=True)
+        title = info.get('title', 'video')
+        # Ищем пути к скачанным файлам видео и аудио
+        video_path = None
+        audio_path = None
+        for fmt in info.get('requested_formats', []):
+            if fmt.get('vcodec') != 'none':
+                video_path = ydl.prepare_filename(fmt)
+            if fmt.get('acodec') != 'none':
+                audio_path = ydl.prepare_filename(fmt)
+
+        # Если формат одиночный (уже со звуком), просто читаем файл и отдаём
+        if video_path and audio_path is None:
+            # Одиночный файл, отдаём как есть
+            with open(video_path, 'rb') as f:
+                single_file_data = f.read()
+            # Удаляем временный файл
+            os.remove(video_path)
+            return StreamingResponse(
+                io.BytesIO(single_file_data),
+                media_type='video/mp4',
+                headers={'Content-Disposition': f'attachment; filename="{title}.mp4"'}
+            )
+
+        # Если не нашлись пути (что редко, но может быть)
+        if not video_path or not audio_path:
+            raise HTTPException(status_code=500, detail="Не удалось извлечь видео и аудио потоки")
+
+        # Запускаем ffmpeg для склейки и отправки результата в реальном времени
+        def generate():
+            # Команда: ffmpeg -i video -i audio -c:v copy -c:a aac -f mp4 pipe:1
+            cmd = [
+                'ffmpeg',
+                '-i', video_path,
+                '-i', audio_path,
+                '-c:v', 'copy',
+                '-c:a', 'aac',
+                '-f', 'mp4',
+                '-movflags', 'frag_keyframe+empty_moov',  # для стриминга
+                'pipe:1'
+            ]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            try:
+                for chunk in iter(lambda: proc.stdout.read(8192), b''):
+                    yield chunk
+                proc.wait()
+                if proc.returncode != 0:
+                    raise Exception("ffmpeg error")
+            finally:
+                # Очистка временных файлов
+                os.remove(video_path)
+                os.remove(audio_path)
+
+        return StreamingResponse(
+            generate(),
+            media_type='video/mp4',
+            headers={'Content-Disposition': f'attachment; filename="{title}.mp4"'}
         )
-        info = json.loads(result.stdout)
 
-        # Собираем только видео+аудио форматы (с видео и аудио дорожками)
-        formats_list = []
-        for f in info.get('formats', []):
-            if f.get('vcodec') == 'none':
-                continue  # чисто аудио пропускаем, но можно добавить и аудио при желании
-            formats_list.append({
-                'format_id': f['format_id'],
-                'ext': f['ext'],
-                'resolution': f.get('resolution') or f.get('format_note') or 'audio',
-                'filesize': f.get('filesize')
-            })
-
-        return jsonify({
-            'title': info.get('title'),
-            'formats': formats_list
-        })
-    except subprocess.CalledProcessError as e:
-        return jsonify({'error': f'yt-dlp failed: {e.stderr}'}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/download')
-def download():
-    url = request.args.get('url')
-    format_id = request.args.get('format_id', 'best')
-    if not url:
-        return jsonify({'error': 'URL is required'}), 400
-
-    try:
-        # -g получает прямую ссылку для указанного формата
-        result = subprocess.run(
-            ['yt-dlp', '-g', '-f', format_id, '--no-playlist', url],
-            capture_output=True, text=True, check=True
-        )
-        direct_url = result.stdout.strip().split('\n')[0]  # первая ссылка
-        if not direct_url:
-            return jsonify({'error': 'No URL returned'}), 500
-        return redirect(direct_url)
-    except subprocess.CalledProcessError as e:
-        return jsonify({'error': f'yt-dlp failed: {e.stderr}'}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-if __name__ == '__main__':
-    app.run()
+# Точка входа для Render: uvicorn запускает app
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
