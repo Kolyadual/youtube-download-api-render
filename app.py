@@ -1,77 +1,73 @@
 import os
 import tempfile
-import uuid
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 import yt_dlp
 
-app = FastAPI(title="Open Video Downloader API")
+app = Flask(__name__)
+CORS(app)
 
-# Разрешаем твоему фронтенду на GitHub Pages обращаться к API
-origins = os.getenv("ALLOWED_ORIGIN", "*")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[origins],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def get_cookiefile():
+    # Сначала пробуем переменную окружения Render
+    data = os.environ.get('YOUTUBE_COOKIES')
+    if data:
+        path = '/tmp/cookies.txt'
+        with open(path, 'w') as f:
+            f.write(data)
+        return path
+    # Если переменной нет – ищем файл в репозитории
+    if os.path.exists('cookies.txt'):
+        return 'cookies.txt'
+    return None
 
-@app.get("/")
-def root():
-    return {"status": "API is running. Use /download?url=..."}
+@app.route('/api/download', methods=['POST'])
+def download():
+    data = request.get_json()
+    url = data.get('url')
+    mode = data.get('mode', 'video')
 
-@app.get("/download")
-async def download_video(url: str = Query(..., description="YouTube video URL")):
-    # Базовая проверка ссылки
-    if not any(domain in url for domain in ("youtube.com/watch", "youtu.be/")):
-        raise HTTPException(status_code=400, detail="Некорректная ссылка на YouTube")
+    if not url:
+        return jsonify({'error': 'URL is required'}), 400
 
-    # Создаём временную папку для загрузки
-    with tempfile.TemporaryDirectory() as tmpdir:
-        unique_id = str(uuid.uuid4())[:8]
-        outtmpl = os.path.join(tmpdir, f"{unique_id}_%(title)s.%(ext)s")
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'noplaylist': True,
+        'format': 'best',  # <-- простой best
+        'outtmpl': os.path.join(tempfile.gettempdir(), '%(title)s.%(ext)s'),
+        'extractor_args': {'youtube': {'player_client': ['android']}},
+    }
 
-        ydl_opts = {
-            # Выбираем лучший MP4, где видео и аудио уже объединены (до 720p/1080p)
-            'format': 'best[ext=mp4]/best',
-            'outtmpl': outtmpl,
-            'quiet': True,
-            'no_warnings': True,
-            # На случай возрастных ограничений можно добавить cookies, но пока без них
-            # 'cookiefile': 'cookies.txt'
-        }
+    cookiefile = get_cookiefile()
+    if cookiefile:
+        ydl_opts['cookiefile'] = cookiefile
 
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                title = info.get('title', 'video')
+    if mode == 'audio':
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }]
 
-                # Найдём скачанный файл (один, без аудио-разрывов)
-                downloaded_file = ydl.prepare_filename(info)
-                # Если такого файла нет, значит расширение было изменено
-                if not os.path.exists(downloaded_file):
-                    # Попробуем найти любой mp4 в папке
-                    for f in os.listdir(tmpdir):
-                        if f.endswith('.mp4'):
-                            downloaded_file = os.path.join(tmpdir, f)
-                            break
-                    else:
-                        raise Exception("Скачанный файл не найден")
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filepath = ydl.prepare_filename(info)
+            if mode == 'audio':
+                filepath = os.path.splitext(filepath)[0] + '.mp3'
+            filename = os.path.basename(filepath)
+            return jsonify({'download_url': f'/download/{filename}', 'filename': filename})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
-                # Отдаём файл и автоматически удаляем после ответа
-                return FileResponse(
-                    downloaded_file,
-                    media_type='video/mp4',
-                    headers={'Content-Disposition': f'attachment; filename="{title}.mp4"'}
-                )
+@app.route('/download/<filename>')
+def serve_file(filename):
+    return send_from_directory(tempfile.gettempdir(), filename, as_attachment=True)
 
-        except yt_dlp.utils.DownloadError as e:
-            raise HTTPException(status_code=500, detail=f"Ошибка загрузки: {str(e)}")
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Ошибка сервера: {str(e)}")
+@app.route('/ping')
+def ping():
+    return 'pong'
 
-# Команда запуска остаётся: uvicorn app:app --host 0.0.0.0 --port $PORT
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
