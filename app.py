@@ -7,7 +7,11 @@ import yt_dlp
 app = Flask(__name__)
 CORS(app)
 
+# ⚠️ ВСТАВЬ СЮДА URL СВОЕГО POT-СЕРВЕРА
+POT_PROVIDER_URL = 'https://bgutil-ytdlp-pot-provider.onrender.com'
+
 def get_cookiefile():
+    """Возвращает путь к файлу с куками (из переменной окружения или локального файла)."""
     data = os.environ.get('YOUTUBE_COOKIES')
     if data:
         path = '/tmp/cookies.txt'
@@ -31,8 +35,20 @@ def download():
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
+        'format': 'best',  # с PoToken будет работать
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(title)s.%(ext)s'),
-        'extractor_args': {'youtube': {'player_client': ['android']}},
+        'extractor_args': {
+            'youtube': {
+                # Важно: указываем плагин для получения PoToken
+                'pot': {
+                    'provider': 'bgutil',
+                    'bgutil_url': POT_PROVIDER_URL,
+                    'client_variant': 'web',  # или 'android', если web не сработает
+                },
+                # Дополнительно можно указать player_client (необязательно)
+                'player_client': ['web'],
+            }
+        },
     }
 
     cookiefile = get_cookiefile()
@@ -40,11 +56,14 @@ def download():
         ydl_opts['cookiefile'] = cookiefile
 
     if mode == 'audio':
-        # Скачиваем только аудиодорожку в m4a (без конвертации в mp3)
-        ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio'
-    else:
-        # Видео в mp4 с уже включённым звуком (без склеивания)
-        ydl_opts['format'] = 'best[ext=mp4]/best'
+        ydl_opts['format'] = 'bestaudio/best'
+        # Конвертация в mp3 не используется, чтобы не требовать ffmpeg
+        # При желании можно раскомментировать строки ниже и установить ffmpeg на Render
+        # ydl_opts['postprocessors'] = [{
+        #     'key': 'FFmpegExtractAudio',
+        #     'preferredcodec': 'mp3',
+        #     'preferredquality': '192',
+        # }]
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
