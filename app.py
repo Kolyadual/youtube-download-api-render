@@ -7,11 +7,10 @@ import yt_dlp
 app = Flask(__name__)
 CORS(app)
 
-# ⚠️ ВСТАВЬ СЮДА URL СВОЕГО POT-СЕРВЕРА
-POT_PROVIDER_URL = 'https://bgutil-ytdlp-pot-provider.onrender.com'
+# ⚠️ СЮДА ВСТАВЬ URL СВОЕГО POT-СЕРВЕРА
+POT_PROVIDER_URL = 'https://pot-provider-xxxx.onrender.com'
 
 def get_cookiefile():
-    """Возвращает путь к файлу с куками (из переменной окружения или локального файла)."""
     data = os.environ.get('YOUTUBE_COOKIES')
     if data:
         path = '/tmp/cookies.txt'
@@ -31,21 +30,20 @@ def download():
     if not url:
         return jsonify({'error': 'URL is required'}), 400
 
+    # Основные опции с PoToken
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'format': 'best',  # с PoToken будет работать
+        'format': 'best',               # теперь будет работать с PoToken
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(title)s.%(ext)s'),
         'extractor_args': {
             'youtube': {
-                # Важно: указываем плагин для получения PoToken
                 'pot': {
                     'provider': 'bgutil',
                     'bgutil_url': POT_PROVIDER_URL,
-                    'client_variant': 'web',  # или 'android', если web не сработает
+                    'client_variant': 'web',
                 },
-                # Дополнительно можно указать player_client (необязательно)
                 'player_client': ['web'],
             }
         },
@@ -57,20 +55,18 @@ def download():
 
     if mode == 'audio':
         ydl_opts['format'] = 'bestaudio/best'
-        # Конвертация в mp3 не используется, чтобы не требовать ffmpeg
-        # При желании можно раскомментировать строки ниже и установить ffmpeg на Render
-        # ydl_opts['postprocessors'] = [{
-        #     'key': 'FFmpegExtractAudio',
-        #     'preferredcodec': 'mp3',
-        #     'preferredquality': '192',
-        # }]
+        # Без конвертации в mp3 – получится m4a (YouTube так отдаёт)
+        # Если нужен mp3, потребуется ffmpeg, но это позже
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filepath = ydl.prepare_filename(info)
             filename = os.path.basename(filepath)
-            return jsonify({'download_url': f'/download/{filename}', 'filename': filename})
+            return jsonify({
+                'download_url': f'/download/{filename}',
+                'filename': filename
+            })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
