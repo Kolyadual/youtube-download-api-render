@@ -8,14 +8,12 @@ app = Flask(__name__)
 CORS(app)
 
 def get_cookiefile():
-    # Сначала пробуем переменную окружения Render
     data = os.environ.get('YOUTUBE_COOKIES')
     if data:
         path = '/tmp/cookies.txt'
         with open(path, 'w') as f:
             f.write(data)
         return path
-    # Если переменной нет – ищем файл в репозитории
     if os.path.exists('cookies.txt'):
         return 'cookies.txt'
     return None
@@ -33,7 +31,6 @@ def download():
         'quiet': True,
         'no_warnings': True,
         'noplaylist': True,
-        'format': 'best',  # <-- простой best
         'outtmpl': os.path.join(tempfile.gettempdir(), '%(title)s.%(ext)s'),
         'extractor_args': {'youtube': {'player_client': ['android']}},
     }
@@ -43,19 +40,16 @@ def download():
         ydl_opts['cookiefile'] = cookiefile
 
     if mode == 'audio':
-        ydl_opts['format'] = 'bestaudio/best'
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }]
+        # Скачиваем только аудиодорожку в m4a (без конвертации в mp3)
+        ydl_opts['format'] = 'bestaudio[ext=m4a]/bestaudio'
+    else:
+        # Видео в mp4 с уже включённым звуком (без склеивания)
+        ydl_opts['format'] = 'best[ext=mp4]/best'
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filepath = ydl.prepare_filename(info)
-            if mode == 'audio':
-                filepath = os.path.splitext(filepath)[0] + '.mp3'
             filename = os.path.basename(filepath)
             return jsonify({'download_url': f'/download/{filename}', 'filename': filename})
     except Exception as e:
