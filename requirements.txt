@@ -1,6 +1,4 @@
-flask
+Flask
 flask-cors
 yt-dlp
 gunicorn
-requests
-bgutil-ytdlp-pot-provider
